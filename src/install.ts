@@ -48,6 +48,9 @@ export class InstallOptions {
   @arg('--force', 'Force (re)installation')
   force?: boolean = false
 
+  @arg('--skip-finalize', 'Skip the npm finalization step')
+  skipFinalize?: boolean = false
+
   @arg('--cache', 'Cache path')
   cache = path.join(os.homedir(), '.fastpm')
 
@@ -97,7 +100,7 @@ export const install = async (options: InstallOptions) => {
   const finish = async () => {
     // if this isn't a peer dependency install, we finalize with
     // by running `npm install` which links local dependencies and runs scripts
-    if (!options.peer)
+    if (!options.peer && !options.skipFinalize)
       execInstall(root)
   }
 
