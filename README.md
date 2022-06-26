@@ -1,5 +1,5 @@
 <h1>
-fastpm <a href="https://npmjs.org/package/fastpm"><img src="https://img.shields.io/badge/npm-v1.0.0-F00.svg?colorA=000"/></a> <a href="src"><img src="https://img.shields.io/badge/loc-429-FFF.svg?colorA=000"/></a> <a href="https://cdn.jsdelivr.net/npm/fastpm@1.0.0/dist/fastpm.min.js"><img src="https://img.shields.io/badge/brotli-5K-333.svg?colorA=000"/></a> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-F0B.svg?colorA=000"/></a>
+fastpm <a href="https://npmjs.org/package/fastpm"><img src="https://img.shields.io/badge/npm-v1.0.1-F00.svg?colorA=000"/></a> <a href="src"><img src="https://img.shields.io/badge/loc-429-FFF.svg?colorA=000"/></a> <a href="https://cdn.jsdelivr.net/npm/fastpm@1.0.1/dist/fastpm.min.js"><img src="https://img.shields.io/badge/brotli-5K-333.svg?colorA=000"/></a> <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-F0B.svg?colorA=000"/></a>
 </h1>
 
 <p></p>
@@ -15,25 +15,6 @@ Fast package manager for Node.js.
 <code>yarn global add fastpm</code>
 </td></tr></table>
 </h4>
-
-## What it does
-
-**`fastpm`** will install the dependencies of your project, using `npm`,
-but in a central location and then symlink them inside `node_modules`.
-
-This allows for faster installation times and saves disk space.
-
-## How
-
-For every dependency, it creates a project that requires it and then uses the `--global-style` parameter to make that dependency contain all of its dependencies in a flat structure. This way it can be symlinked to a location and it will work with
-minimal issues. It also tries to install `peerDependencies` transitively
-in order to work with certain tooling such as `eslint` and `jest`. It also runs
-`postinstall` scripts on the dependencies as it would have been the case if they were installed normally within our project. Finally, it runs `npm install` inside the
-target project's directory, which lets it perform the necessary local links and do its own final magic that somewhat fixes the state of `node_modules` if it wasn't 100% achieved during the symlinks.
-
-This is obviously very experimental and not the recommended way of doing things, but it works for my use-case and I did manage to get rid **>30gb** of unnecessary duplication using this technique and so I hope it's useful to someone.
-
-Currently it only has one command, `install`, but maybe in the future I'll add more commands that fit my workflow, who knows.
 
 ## API
 
