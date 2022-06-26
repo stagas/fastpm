@@ -1,20 +1,13 @@
 import * as child_process from 'child_process'
 import { arg } from 'decarg'
-import { constants } from 'fs'
 import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
 import * as semver from 'semver'
 import * as util from 'util'
+import { CoreOptions, exists } from './core'
 
-const readable = async (pathname: string) => {
-  try {
-    await fs.access(pathname, constants.R_OK)
-    return true
-  } catch (error) {
-    return false
-  }
-}
+const isSymlink = (version: string) => version.startsWith('file:') || version.startsWith('link:')
 
 const exec = (cmd: string, args: string[] = [], options: child_process.SpawnOptions = {}) =>
   new Promise(resolve => {
@@ -35,13 +28,7 @@ const exec = (cmd: string, args: string[] = [], options: child_process.SpawnOpti
     child.on('exit', resolve)
   })
 
-export class InstallOptions {
-  @arg('--bin', 'npm binary')
-  bin = 'safe-npm'
-
-  @arg('--root', 'Project directory with a package.json to install depndencies in')
-  root = '.'
-
+export class InstallOptions extends CoreOptions {
   @arg('--peer', 'Install peer dependencies only')
   peer?: boolean = false
 
@@ -51,27 +38,44 @@ export class InstallOptions {
   @arg('--skip-finalize', 'Skip the npm finalization step')
   skipFinalize?: boolean = false
 
+  @arg('--fast', 'Apply all the fast options together')
+  fast?: boolean = false
+
   @arg('--cache', 'Cache path')
   cache = path.join(os.homedir(), '.fastpm')
 
   deps?: string
 
   constructor(options: Partial<InstallOptions> = {}) {
+    super(options)
     Object.assign(this, options)
   }
 }
 
 export const install = async (options: InstallOptions) => {
+  if (options.fast)
+    options.skipFinalize = true
+
   const root = path.resolve(options.root)
+
+  // read root's package.json
+  let pkg: any
+  try {
+    pkg = await import(path.join(root, 'package.json'))
+  } catch (error) {
+    if ((error as any).code === 'MODULE_NOT_FOUND') {
+      console.error('Cannot locate package.json under: %s', root)
+      console.error('Repeat this command inside a project folder that contains a package.json file.')
+      process.exit(1)
+    }
+  }
+
   console.log('starting installation under "%s" ...\n', root)
 
   // create a node_modules directory inside root
   const node_modules = path.join(root, 'node_modules')
   const binTarget = path.join(node_modules, '.bin')
   await fs.mkdir(node_modules, { recursive: true })
-
-  // read root's package.json
-  const pkg = await import(path.join(root, 'package.json'))
 
   // installs a package's dependencies
   const execInstall = (cwd: string) =>
@@ -82,6 +86,9 @@ export const install = async (options: InstallOptions) => {
 
         // force dependencies to have single directory structure, but flat their own
         '--global-style',
+
+        // include peer dependencies
+        '--include=peer',
 
         // try to use cache first
         '--prefer-offline',
@@ -161,7 +168,7 @@ export const install = async (options: InstallOptions) => {
 
     for (const [name, version] of Object.entries(pkg[deps] ?? {}) as [string, string][]) {
       // if it's a file: or link: dependency, ignore it and let it be handled by the `npm install` finalize step
-      if (version.startsWith('file:') || version.startsWith('link:')) {
+      if (!options.skipFinalize && isSymlink(version)) {
         const target = path.join(node_modules, name)
         console.log('  local: %s < %s > ./%s', name, version, path.relative(root, target))
         continue
@@ -170,13 +177,34 @@ export const install = async (options: InstallOptions) => {
       tasks.push(async () => {
         const distTarget = path.join(node_modules, name)
 
-        // ignore if package is already installed and not using --force
-        if (await readable(distTarget)) {
-          console.log(' exists: %s@%s > ./%s', name, version, path.relative(root, distTarget))
-          if (options.force)
+        // if package is in node_modules
+        if (await exists(distTarget)) {
+          // if not using --force
+          if (!options.force) {
+            // try to read target's package.json
+            try {
+              const targetPkg = await import(path.join(distTarget, 'package.json'))
+              // ignore if package's version inside node_modules satisfies the one we want to install
+              if (semver.satisfies(targetPkg.version, version, { loose: true })) {
+                console.log(' exists: %s@%s > ./%s', name, version, path.relative(root, distTarget))
+                return
+              }
+            } catch {}
+          }
+          // we didn't find the package version we wanted and didn't use --force, so remove it
+          try {
             await fs.rm(distTarget, { recursive: true })
-          else
-            return
+          } catch {
+            await fs.unlink(distTarget)
+          }
+        }
+
+        // if it's a local link just do a naive symlink
+        if (isSymlink(version)) {
+          const localSource = path.resolve(root, version.replace('file:', '').replace('link:', ''))
+          console.log('linking', localSource, distTarget)
+          await fs.symlink(localSource, distTarget)
+          return
         }
 
         // links package dist and bin sources
@@ -200,6 +228,7 @@ export const install = async (options: InstallOptions) => {
               console.log('symlink: %s > ./%s', source, path.relative(root, target))
 
               await fs.mkdir(path.dirname(target), { recursive: true })
+              if (await exists(target)) await fs.unlink(target)
               await fs.symlink(source, target, 'junction')
             }
           } catch {}
@@ -218,8 +247,10 @@ export const install = async (options: InstallOptions) => {
                 const cachePkg = path.join(options.cache, deps, x)
                 // symlink the package
                 const [distSource, binSource] = getSourcePaths(cachePkg, name)
-                await link(distSource, binSource)
-                return
+                if (await exists(distSource)) {
+                  await link(distSource, binSource)
+                  return
+                }
               }
             }
           }
@@ -234,7 +265,7 @@ export const install = async (options: InstallOptions) => {
         const [distSource, binSource] = getSourcePaths(cachePkg, name)
 
         // if not in cache and not --force, download package
-        if (options.force || !(await readable(cachePkg))) {
+        if (options.force || !(await exists(distSource))) {
           console.log('install: %s@%s > %s', name, version, cachePkg)
 
           await fs.mkdir(cachePkg, { recursive: true })
@@ -249,39 +280,112 @@ export const install = async (options: InstallOptions) => {
           }
 
           // create a phony package with just this package dependency listed
+          const phonyPkg = {
+            // different fields behave differently, when it's a top level use the type
+            // used in our package.json and if it's a peer use its parent deps type
+            [options.deps ?? deps]: {
+              [name]: semver.clean(version)?.toString() ?? version,
+            },
+            // trustedDependencies used by safe-npm
+            trustedDependencies: pkg.trustedDependencies ?? [],
+          }
           await fs.writeFile(
             path.join(cachePkg, 'package.json'),
-            JSON.stringify({
-              // different fields behave differently, when it's a top level use the type
-              // used in our package.json and if it's a peer use its parent deps type
-              [options.deps ?? deps]: {
-                [name]: semver.clean(version)?.toString() ?? version,
-              },
-              // trustedDependencies used by safe-npm
-              trustedDependencies: pkg.trustedDependencies ?? [],
-            })
+            JSON.stringify(phonyPkg)
           )
 
           // run the install and postinstall on the package
           await execInstall(cachePkg)
-          await execPostInstall(cachePkg)
+          // await execPostInstall(cachePkg)
 
           // install this package's peerDependencies
           // TODO: do we need to recurse deeply or are single level peer deps enough?
           if (!options.peer) {
+            const discoverPeerDeps = async (parent: string, root: string, deps: Record<string, string> = {}) => {
+              let pkg
+
+              try {
+                pkg = await import(path.join(root, 'package.json'))
+              } catch {
+                return deps
+              }
+
+              // TODO: overwrite for now but need to check versions
+              Object.assign(deps, pkg.peerDependencies ?? {})
+
+              if (pkg.peerDependenciesMeta) {
+                for (const name in pkg.peerDependenciesMeta) {
+                  // if the meta dependency is missing from peerDependencies
+                  if (!(name in deps)) {
+                    // use the version in its devDependencies if possible
+                    if (name in pkg.devDependencies)
+                      deps[name] = pkg.devDependencies[name]
+                    // as last resort, install any dependency
+                    else
+                      deps[name] = '*'
+                  }
+                }
+              }
+
+              const next = []
+
+              for (const p in (pkg.dependencies ?? {})) {
+                let target = path.join(root, 'node_modules', p)
+                if (!(await exists(target))) target = path.join(parent, 'node_modules', p)
+                if (!(await exists(target))) continue
+                next.push(discoverPeerDeps(root, target, deps))
+              }
+
+              await Promise.all(next)
+
+              return deps
+            }
+
             remainingTasks++
+
             tasks.push(async () => {
-              await install(
-                new InstallOptions({
-                  root: distSource,
-                  peer: true,
-                  // inherit force mode
-                  force: options.force,
-                  // inherit deps field type
-                  deps,
-                })
-              )
+              const peerDeps = await discoverPeerDeps(root, distSource)
+              if (Object.keys(peerDeps).length) {
+                phonyPkg.dependencies ??= {}
+                // TODO: overwrite for now but need to check versions
+                Object.assign(phonyPkg.dependencies, peerDeps)
+                await fs.writeFile(
+                  path.join(cachePkg, 'package.json'),
+                  JSON.stringify(phonyPkg)
+                )
+                await execInstall(cachePkg)
+              }
+              await execPostInstall(cachePkg)
+
+              // move them
+              for (const key of Object.keys(peerDeps)) {
+                const source = path.join(cachePkg, 'node_modules', key)
+                const target = path.join(distSource, 'node_modules', key)
+                if (await exists(target)) {
+                  if (!options.force) {
+                    continue
+                  }
+                  await fs.unlink(target)
+                }
+                await fs.mkdir(path.dirname(target), { recursive: true })
+                await fs.symlink(source, target, 'junction')
+              }
             })
+
+            // remainingTasks++
+
+            // tasks.push(async () => {
+            //   await install(
+            //     new InstallOptions({
+            //       root: distSource,
+            //       peer: true,
+            //       // inherit force mode
+            //       force: options.force,
+            //       // inherit deps field type
+            //       deps,
+            //     })
+            //   )
+            // })
           }
         }
 
